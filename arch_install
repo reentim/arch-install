@@ -95,8 +95,31 @@ Name=en*
 DHCP=yes
 EOF
 arch-chroot /mnt ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=GRUB
-arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
+
+arch-chroot /mnt sed -i."$(date +%s)" 's/^#default_uki/default_uki/' /etc/mkinitcpio.d/linux.preset
+arch-chroot /mnt sed -i."$(date +%s)" 's/^#default_options/default_options/' /etc/mkinitcpio.d/linux.preset
+arch-chroot /mnt sed -i."$(date +%s)" 's/^#fallback_uki/fallback_uki/' /etc/mkinitcpio.d/linux.preset
+
+arch-chroot /mnt sed -i."$(date +%s)" 's/^#default_uki/default_uki/' /etc/mkinitcpio.d/linux-lts.preset
+arch-chroot /mnt sed -i."$(date +%s)" 's/^#default_options/default_options/' /etc/mkinitcpio.d/linux-lts.preset
+arch-chroot /mnt sed -i."$(date +%s)" 's/^#fallback_uki/fallback_uki/' /etc/mkinitcpio.d/linux-lts.preset
+
+arch-chroot /mnt sed -i."$(date +%s)" 's/^MODULES=()$/MODULES=(btrfs)/' /etc/mkinitcpio.conf
+
+arch-chroot /mnt bootctl install
+arch-chroot /mnt mkdir -p /efi/loader/entries
+arch-chroot /mnt cat > /efi/loader/loader.conf <<EOF
+timeout 5
+default arch
+EOF
+arch-chroot /mnt cat > /efi/loader/entries/arch.conf <<EOF
+title Arch Linux
+efi /EFI/Linux/arch-linux.efi
+options root=PARTUUID=$(findmnt / -o PARTUUID -n) rw rootflags=subvol=@
+EOF
+
+arch-chroot /mnt bootctl status
+echo
 
 arch-chroot /mnt passwd
 echo

@@ -1,11 +1,7 @@
 amd-ucode
 base-devel
 btrfs-progs
-efibootmgr
 git
-grub
-grub-btrfs
-inotify-tools
 less
 man-db
 man-pages
