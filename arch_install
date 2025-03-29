@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+
+# To be run from Arch live ISO
+
+set -ex
+
+if [ -z "$1" ]; then
+  echo "Usage: $0 /dev/nvme-..."
+  exit 1
+else
+  DISK="$1"
+  if blkid $DISK; then
+    echo "ABORT: Target disk is not empty"
+    exit 1
+  fi
+fi
+
+if ! [ -e "$(dirname "$(realpath "$0")")/packages.list" ]; then
+  echo "ABORT: Can't find packages.list"
+  exit 1
+fi
+
+echo -e "## INSTALLING ARCH ON DISK:\n"
+fdisk -l $DISK
+echo
+
+echo "WARNING: Formatting disk in 5 seconds..."
+sleep 5
+echo
+
+parted $DISK --script mklabel gpt
+parted $DISK --script mkpart "EFI" fat32 1MiB 1GiB
+parted $DISK --script set 1 esp on
+parted $DISK --script mkpart "Arch" btrfs 1GiB 101GiB
+fdisk -l $DISK
+echo
+
+mkfs.fat -F 32 "$DISK-part1"
+mkfs.btrfs -f -L "Arch" "$DISK-part2"
+
+sleep 1
+
+mount "$DISK-part2" /mnt
+btrfs subvolume create /mnt/@
+btrfs subvolume create /mnt/@home
+btrfs subvolume create /mnt/@log
+btrfs subvolume create /mnt/@cache
+btrfs subvolume create /mnt/@snapshots
+umount /mnt
+echo
+
+mount -o noatime,compress=zstd,ssd,discard=async,subvol=@ "$DISK-part2" /mnt
+mkdir -p /mnt/{home,root,var/log,var/cache,.snapshots}
+mount -o noatime,compress=zstd,ssd,discard=async,subvol=@home "$DISK-part2" /mnt/home
+mount -o noatime,compress=zstd,ssd,discard=async,subvol=@log "$DISK-part2" /mnt/var/log
+mount -o noatime,compress=zstd,ssd,discard=async,subvol=@cache "$DISK-part2" /mnt/var/cache
+mount -o noatime,compress=zstd,ssd,discard=async,subvol=@snapshots "$DISK-part2" /mnt/.snapshots
+mount --mkdir "$DISK-part1" /mnt/efi
+echo
+
+reflector --verbose -l 200 -n 20 -p http --sort rate -c Australia --save /etc/pacman.d/mirrorlist
+pacstrap -K /mnt base linux linux-lts linux-firmware
+
+if [ -e /mnt/etc/fstab.bak ]; then
+  cp /mnt/etc/fstab{.bak,}
+else
+  cp /mnt/etc/fstab{,.bak}
+fi
+
+genfstab -U /mnt >> /mnt/etc/fstab
+
+cp "$(dirname "$(realpath "$0")")/packages.list" "$0" /mnt/root
+
+echo "## Changing root to /mnt"
+arch-chroot /mnt pacman -S --needed --noconfirm - < /root/arch_packages.list
+arch-chroot /mnt ln -sf /usr/share/zoneinfo/Australia/Melbourne /etc/localtime
+arch-chroot /mnt hwclock --systohc
+arch-chroot /mnt echo "en_AU.UTF-8 UTF-8" >> /etc/locale.gen
+arch-chroot /mnt locale-gen
+arch-chroot /mnt echo "LANG=en_AU.UTF-8" > /etc/locale.conf
+arch-chroot /mnt echo "fractal-arch" > /etc/hostname
+arch-chroot /mnt cat > /etc/hosts <<EOF
+127.0.0.1 localhost
+::1 localhost
+
+127.0.1.1 fractal-arch.local fractal-arch
+EOF
+arch-chroot /mnt systemctl enable systemd-networkd systemd-resolve
+arch-chroot /mnt mkdir -p /etc/systemd/network
+arch-chroot /mnt cat > /etc/systemd/network/20-wired.network <<EOF
+[Match]
+Name=en*
+
+[Network]
+DHCP=yes
+EOF
+arch-chroot /mnt ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+arch-chroot /mnt grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=GRUB
+arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
+
+arch-chroot /mnt passwd
+echo
+
+echo "## Installation complete!"
+arch-chroot /mnt /bin/bash
