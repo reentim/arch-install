@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+
+PUBLIC_KEYS_URL="${PUBLIC_KEYS_URL:-https://github.com/reentim.keys}"
+LINUX_SYSTEM_PART_SIZE="${LINUX_SYSTEM_PART_SIZE:-100%}"
+USERNAME="${USERNAME:-tim}"
+TIMEZONE="${TIMEZONE:-Australia/Melbourne}"
+LOCALE="${LOCALE:-en_AU.UTF-8}"
+ARCH_HOSTNAME="${ARCH_HOSTNAME:-fractal-arch}"
+
+set -euo pipefail
+
+main() {
+	if [ -e /dev/disk/by-partlabel/EFI ]; then
+		echo "ABORT: Partition with 'EFI' label already exists"
+		exit 1
+	fi
+	if [ -e /dev/disk/by-partlabel/Arch ]; then
+		echo "ABORT: Partition with 'Arch' label already exists"
+		exit 1
+	fi
+
+	parted $DISK --script mklabel gpt
+	parted $DISK --script mkpart "EFI" fat32 1MiB 1GiB
+	parted $DISK --script set 1 esp on
+	parted $DISK --script mkpart "Arch" btrfs 1GiB $LINUX_SYSTEM_PART_SIZE
+	fdisk -l $DISK
+	echo
+
+	wait_for_disks
+
+	mkfs.fat -F 32 /dev/disk/by-partlabel/EFI
+	mkfs.btrfs -f -L "Arch" /dev/disk/by-partlabel/Arch
+
+	wait_for_disks
+
+	mount /dev/disk/by-partlabel/Arch /mnt
+	btrfs subvolume create /mnt/@
+	btrfs subvolume create /mnt/@home
+	btrfs subvolume create /mnt/@log
+	btrfs subvolume create /mnt/@cache
+	btrfs subvolume create /mnt/@snapshots
+	umount /mnt
+	echo
+
+	wait_for_disks
+
+	mount -o noatime,compress=zstd,ssd,discard=async,subvol=@ /dev/disk/by-partlabel/Arch /mnt
+	mkdir -p /mnt/{home,root,var/log,var/cache,.snapshots}
+	mount -o noatime,compress=zstd,ssd,discard=async,subvol=@home /dev/disk/by-partlabel/Arch /mnt/home
+	mount -o noatime,compress=zstd,ssd,discard=async,subvol=@log /dev/disk/by-partlabel/Arch /mnt/var/log
+	mount -o noatime,compress=zstd,ssd,discard=async,subvol=@cache /dev/disk/by-partlabel/Arch /mnt/var/cache
+	mount -o noatime,compress=zstd,ssd,discard=async,subvol=@snapshots /dev/disk/by-partlabel/Arch /mnt/.snapshots
+	mount --mkdir /dev/disk/by-partlabel/EFI /mnt/efi
+
+	reflector --verbose -l 200 -n 20 -p http --sort rate -c Australia --save /etc/pacman.d/mirrorlist
+	pacstrap /mnt base
+
+	genfstab -U /mnt >> /mnt/etc/fstab
+
+	echo "## Changing root to /mnt"
+	arch-chroot /mnt pacman -S --needed --noconfirm - < "$(dirname "$(realpath "$0")")/packages.list"
+	arch-chroot /mnt sh -c 'ln -sf /usr/share/zoneinfo/Australia/Melbourne /etc/localtime'
+	arch-chroot /mnt sh -c 'hwclock --systohc'
+	arch-chroot /mnt sh -c "sed -i "/^#"$LOCALE"/s/^#//" /etc/locale.gen"
+	arch-chroot /mnt sh -c 'locale-gen'
+	arch-chroot /mnt sh -c "echo "LANG="$LOCALE"" > /etc/locale.conf"
+	arch-chroot /mnt sh -c "echo "$ARCH_HOSTNAME" > /etc/hostname"
+	arch-chroot /mnt sh -c "cat > /etc/hosts <<-EOF
+		127.0.0.1 localhost
+		::1 localhost
+
+		127.0.1.1 $ARCH_HOSTNAME.local $ARCH_HOSTNAME
+	EOF"
+	arch-chroot /mnt sh -c 'systemctl enable systemd-networkd systemd-resolved'
+	arch-chroot /mnt sh -c 'mkdir -p /etc/systemd/network'
+	arch-chroot /mnt sh -c 'cat > /etc/systemd/network/20-wired.network <<-EOF
+		[Match]
+		Name=en*
+
+		[Network]
+		DHCP=yes
+	EOF'
+	arch-chroot /mnt sh -c 'sudo ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf'
+
+	arch-chroot /mnt sh -c 'grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=GRUB'
+	arch-chroot /mnt sh -c 'sed -i "s/^GRUB_CMDLINE_LINUX_DEFAULT.*/GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet consoleblank=300\"/" /etc/default/grub'
+	arch-chroot /mnt sh -c 'grub-mkconfig -o /boot/grub/grub.cfg'
+	echo
+
+	echo "Running passwd for root..."
+	arch-chroot /mnt passwd
+	echo
+
+	arch-chroot /mnt sh -c "useradd -m -s /usr/bin/zsh $USERNAME"
+	echo "Running passwd for $USERNAME..."
+	arch-chroot /mnt passwd $USERNAME
+	echo
+
+	echo "Enabling passwordless sudo use for $USERNAME..."
+	arch-chroot /mnt sh -c "echo '$USERNAME ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/$USERNAME"
+	arch-chroot /mnt sh -c "chmod 0440 /etc/sudoers.d/$USERNAME"
+	echo
+
+	echo "Enabling sshd..."
+	arch-chroot /mnt sh -c 'systemctl enable sshd.service'
+	echo
+
+	echo "WARNING: Adding public keys from $PUBLIC_KEYS_URL to /home/$USERNAME/.ssh/authorized_keys"
+	arch-chroot /mnt sh -c "mkdir -p /home/$USERNAME/.ssh"
+	arch-chroot /mnt sh -c "curl $PUBLIC_KEYS_URL > /home/$USERNAME/.ssh/authorized_keys"
+	arch-chroot /mnt sh -c "chmod 644 /home/$USERNAME/.ssh/authorized_keys"
+	arch-chroot /mnt sh -c "chown -R $USERNAME:$USERNAME /home/$USERNAME/.ssh"
+	echo
+
+	echo "Disabling sshd password authentication..."
+	arch-chroot /mnt sh -c 'cat > /etc/ssh/sshd_config.d/100-disable-password-auth.conf <<-EOF
+		PasswordAuthentication no
+		ChallengeResponseAuthentication no
+		UsePAM no
+	EOF'
+	arch-chroot /mnt sh -c 'chmod 644 /etc/ssh/sshd_config.d/100-disable-password-auth.conf'
+	echo
+
+	umount -R /mnt
+
+	echo "## Installation complete!"
+	echo
+}
+
+wait_for_disks() {
+	partprobe $DISK
+	while ! blkid /dev/disk/by-partlabel/EFI > /dev/null; do
+		echo "Waiting for EFI partition to be available..."
+		sleep 1
+	done
+	while ! blkid /dev/disk/by-partlabel/Arch > /dev/null; do
+		echo "Waiting for Arch partition to be available..."
+		sleep 1
+	done
+	echo
+}
+
+confirm() {
+	while true; do
+		read -r -p "$(tput bold)$(tput setaf 3)Sounds good? (y/N) $(tput sgr0)" response
+		case $response in
+			[Yy]* ) return 0;;
+			* ) return 1;;
+		esac
+	done
+}
+
+if [ -z "$1" ]; then
+	echo "Usage: $0 /dev/empty-device-on-which-to-install-arch"
+	exit 1
+else
+	DISK="$1"
+	if blkid $DISK > /dev/null; then
+		echo "ABORT: $DISK is not empty"
+		exit 1
+	fi
+fi
+
+if ! [ -e "$(dirname "$(realpath "$0")")/packages.list" ]; then
+	echo "ABORT: Can't find packages.list"
+	exit 1
+fi
+
+clear
+
+echo "## $(tput bold)$(tput setaf 6)Installing Arch to:$(tput sgr0)"
+echo
+fdisk -l $DISK
+echo
+echo "## $(tput bold)$(tput setaf 6)With values:$(tput sgr0)"
+echo
+echo "PUBLIC_KEYS_URL: $(tput setaf 1)$PUBLIC_KEYS_URL$(tput sgr0)"
+echo "LINUX_SYSTEM_PART_SIZE: $LINUX_SYSTEM_PART_SIZE"
+echo "USERNAME: $USERNAME"
+echo "TIMEZONE: $TIMEZONE"
+echo "LOCALE: $LOCALE"
+echo "ARCH_HOSTNAME: $ARCH_HOSTNAME"
+echo
+
+if ! confirm; then
+	exit 1
+fi
+
+time main "$@"
+
+# vim: set noexpandtab tabstop=4 shiftwidth=4 softtabstop=4:
