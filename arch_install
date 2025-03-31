@@ -45,11 +45,10 @@ main() {
 	wait_for_disks
 
 	mount -o noatime,compress=zstd,ssd,discard=async,subvol=@ /dev/disk/by-partlabel/Arch /mnt
-	mkdir -p /mnt/{home,root,var/log,var/cache,.snapshots}
+	mkdir -p /mnt/{home,root,var/log,var/cache}
 	mount -o noatime,compress=zstd,ssd,discard=async,subvol=@home /dev/disk/by-partlabel/Arch /mnt/home
 	mount -o noatime,compress=zstd,ssd,discard=async,subvol=@log /dev/disk/by-partlabel/Arch /mnt/var/log
 	mount -o noatime,compress=zstd,ssd,discard=async,subvol=@cache /dev/disk/by-partlabel/Arch /mnt/var/cache
-	mount -o noatime,compress=zstd,ssd,discard=async,subvol=@snapshots /dev/disk/by-partlabel/Arch /mnt/.snapshots
 	mount --mkdir /dev/disk/by-partlabel/EFI /mnt/efi
 
 	reflector --verbose -l 200 -n 20 -p http --sort rate -c Australia --save /etc/pacman.d/mirrorlist
