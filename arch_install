@@ -77,7 +77,9 @@ main() {
 		Name=en*
 
 		[Network]
-		DHCP=yes
+		Address=192.168.0.100/24
+		Gateway=192.168.0.1
+		DNS=192.168.0.1
 	EOF'
 
 	arch-chroot /mnt sh -c 'grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=GRUB'
