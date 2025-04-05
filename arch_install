@@ -79,7 +79,6 @@ main() {
 		[Network]
 		DHCP=yes
 	EOF'
-	arch-chroot /mnt sh -c 'sudo ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf'
 
 	arch-chroot /mnt sh -c 'grub-install --target=x86_64-efi --efi-directory=/efi --bootloader-id=GRUB'
 	arch-chroot /mnt sh -c 'sed -i "s/^GRUB_CMDLINE_LINUX_DEFAULT.*/GRUB_CMDLINE_LINUX_DEFAULT=\"loglevel=3 quiet consoleblank=300\"/" /etc/default/grub'
