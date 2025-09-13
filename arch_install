@@ -68,7 +68,7 @@ main() {
 		127.0.0.1 localhost
 		::1 localhost
 
-		127.0.1.1 $ARCH_HOSTNAME.local $ARCH_HOSTNAME
+		127.0.1.1 $ARCH_HOSTNAME
 	EOF"
 	arch-chroot /mnt sh -c 'systemctl enable systemd-networkd systemd-resolved'
 	arch-chroot /mnt sh -c 'mkdir -p /etc/systemd/network'
